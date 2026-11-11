@@ -1,24 +1,30 @@
 import asyncio, io, json, os, datetime as dt
 import requests
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from curl_cffi.requests import AsyncSession
 from dtek_client import DtekClient
 from dtek_client.browser_auth import get_cleared_cookies
 
+# --- настройки (на GitHub берутся из секретов, на ПК из этих строк) ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID   = os.environ["CHAT_ID"]
 GROUP     = "GPV2.2"
 CITY      = os.environ["CITY"]
 STREET    = os.environ["STREET"]
 HOUSE     = os.environ["HOUSE"]
-BASE = "https://www.dtek-oem.com.ua"
+BASE      = "https://www.dtek-oem.com.ua"
+# ----------------------------------------------------------------------
 
 HERE  = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.join(HERE, "last_slots.json")
 
-COLORS = {"yes": "#4caf50", "no": "#e53935", "maybe": "#ffb300",
-          "first": "#ff7043", "second": "#ff7043",
-          "mfirst": "#ffb300", "msecond": "#ffb300"}
+HALF = {
+    "yes": ("on", "on"), "no": ("off", "off"),
+    "first": ("off", "on"), "second": ("on", "off"),
+    "maybe": ("maybe", "maybe"),
+    "mfirst": ("maybe", "on"), "msecond": ("on", "maybe"),
+}
+HCOLOR = {"on": "#4caf50", "off": "#e53935", "maybe": "#ffb300"}
 
 
 async def fetch_slots():
@@ -45,36 +51,149 @@ def snapshot(slots):
     return {k: str(getattr(v, "value", v)).lower() for k, v in slots.items()}
 
 
-def intervals(snap):
-    hrs = sorted(int(k) for k, v in snap.items() if v == "no")
-    res, start, prev = [], None, None
-    for h in hrs:
-        if start is None:
-            start = prev = h
-        elif h == prev + 1:
-            prev = h
-        else:
-            res.append((start, prev))
-            start = prev = h
-    if start is not None:
-        res.append((start, prev))
-    return [f"{s-1:02d}:00–{e:02d}:00" for s, e in res]
+def half_states(snap):
+    out = []
+    for k in sorted(snap, key=int):
+        out += HALF.get(snap[k], ("on", "on"))
+    return out
+
+
+def runs(states, target):
+    res, start = [], None
+    for i, st in enumerate(states + [None]):
+        if st == target and start is None:
+            start = i
+        elif st != target and start is not None:
+            res.append((start, i))
+            start = None
+    f = lambda m: f"{m // 60:02d}:{m % 60:02d}"
+    return [f"{f(s * 30)}–{f(e * 30)}" for s, e in res]
+
+
+TXT = {
+    "title": "График отключений, очередь 2.2",
+    "tab": "на сегодня",
+    "upd": "Обновлено:",
+    "hours": "Часовые\nпромежутки",
+    "legend": ["Свет есть", "Света нет", "Света не будет первые 30 мин.",
+               "Света не будет вторые 30 мин.", "Возможно"],
+}
+
+FONT_DIRS = ["C:/Windows/Fonts/", "/usr/share/fonts/truetype/dejavu/",
+             "/usr/share/fonts/truetype/liberation/"]
+FONT_REG = ["arial.ttf", "DejaVuSans.ttf", "LiberationSans-Regular.ttf"]
+FONT_BOLD = ["arialbd.ttf", "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf"]
+
+
+def font(size, bold=False):
+    for d in FONT_DIRS:
+        for name in (FONT_BOLD if bold else FONT_REG):
+            try:
+                return ImageFont.truetype(d + name, size)
+            except OSError:
+                pass
+    return ImageFont.load_default()
+
+
+def bolt(d, cx, cy, s, fill, outline=None):
+    pts = [(0.15, -1), (-0.65, 0.1), (-0.05, 0.1), (-0.2, 1), (0.65, -0.25), (0.05, -0.25)]
+    d.polygon([(cx + x * s, cy + y * s) for x, y in pts], fill=fill, outline=outline)
 
 
 def draw(slots):
-    W, H, left = 1000, 170, 20
+    snap = snapshot(slots)
+    ink, gray, line = "#1b2437", "#d3d4d6", "#c9cacc"
+    W, H = 1090, 400
+    if "maybe" in set(v for k in snap for v in HALF.get(snap[k], ("on", "on"))):
+        H += 44
     img = Image.new("RGB", (W, H), "white")
     d = ImageDraw.Draw(img)
     now = dt.datetime.now()
-    d.text((left, 10), f"Group 2.2 - {now:%d.%m.%Y %H:%M}", fill="black")
-    cw = (W - 2 * left) / 24
-    items = sorted(slots.items(), key=lambda kv: int(kv[0]))
-    for i, (k, st) in enumerate(items):
-        x = left + i * cw
-        col = COLORS.get(str(getattr(st, "value", st)).lower(), "#bdbdbd")
-        d.rectangle([x, 40, x + cw - 2, 100], fill=col)
-        d.text((x + 3, 108), f"{i:02d}", fill="black")
-    d.text((left, 135), "green = power, red = outage, yellow = maybe", fill="black")
+
+    d.text((40, 22), TXT["title"], font=font(34, True), fill=ink)
+
+    # вкладка с датой
+    tab = f"{TXT['tab']} {now:%d.%m.%y}"
+    tf = font(24, True)
+    tw = int(d.textlength(tab, font=tf))
+    d.rounded_rectangle([40, 82, 40 + 70 + tw, 134], radius=14, fill="#ffe600")
+    bolt(d, 68, 108, 11, ink)
+    d.text((92, 93), tab, font=tf, fill=ink)
+
+    d.text((40, 160), f"{TXT['upd']} {now:%d.%m.%Y %H:%M}", font=font(17), fill="#5a6070")
+
+    # таблица
+    x0, y0, lw, cw = 40, 195, 150, 36
+    hh, rh = 80, 52
+    xr, yb = x0 + lw + 24 * cw, y0 + hh + rh
+    d.rounded_rectangle([x0, y0, xr, yb], radius=14, outline=line, width=2, fill="white")
+
+    # клетки
+    for i, k in enumerate(sorted(snap, key=int)):
+        a, b = HALF.get(snap[k], ("on", "on"))
+        x = x0 + lw + i * cw
+        ya, yb2 = y0 + hh, y0 + hh + rh - 1
+        mid = x + cw / 2
+        for (xa, xb), st in (((x + 1, mid), a), ((mid, x + cw - 1), b)):
+            if st == "off":
+                d.rectangle([xa, ya + 1, xb, yb2], fill=gray)
+            elif st == "maybe":
+                d.rectangle([xa, ya + 1, xb, yb2], fill="#fff6bf")
+        cx, cy = x + cw / 2, (ya + yb2) / 2
+        if a == "off" and b == "off":
+            bolt(d, cx, cy, 11, ink)
+        elif a == "off" or b == "off":
+            bolt(d, cx + (-8 if a == "off" else 8), cy, 10, "#ffe600", ink)
+        elif a == "maybe" or b == "maybe":
+            bolt(d, cx + (-8 if a == "maybe" else 8), cy, 10, "#ffffff", "#9a8f3a")
+
+    # сетка
+    for i in range(25):
+        x = x0 + lw + i * cw
+        d.line([x, y0, x, yb], fill=line, width=1)
+    d.line([x0, y0 + hh, xr, y0 + hh], fill=line, width=1)
+    d.rounded_rectangle([x0, y0, xr, yb], radius=14, outline=line, width=2)
+
+    # заголовок строки
+    d.multiline_text((x0 + 12, y0 + hh / 2 - 22), TXT["hours"], font=font(19, True),
+                     fill=ink, spacing=2)
+
+    # часы повёрнутым текстом
+    f = font(18, True)
+    for i in range(24):
+        t = f"{i:02d}-{i + 1:02d}"
+        bb = d.textbbox((0, 0), t, font=f)
+        w, th = bb[2] + 6, bb[3] - bb[1]
+        tmp = Image.new("RGBA", (w, th + 6), (255, 255, 255, 0))
+        ImageDraw.Draw(tmp).text((3, 3 - bb[1]), t, font=f, fill=ink)
+        tmp = tmp.rotate(270, expand=True)
+        img.paste(tmp, (int(x0 + lw + i * cw + (cw - tmp.width) / 2), y0 + 8), tmp)
+
+    # легенда
+    legend = TXT["legend"][:]
+    used = set(v for k in snap for v in HALF.get(snap[k], ("on", "on")))
+    rows = [[("on", legend[0]), ("off", legend[1]), ("first", legend[2]),
+             ("second", legend[3])]]
+    if "maybe" in used:
+        rows.append([("maybe", legend[4])])
+    for r, items in enumerate(rows):
+        y, x = 350 + r * 44, 40
+        for kind, label in items:
+            d.rectangle([x, y, x + 34, y + 30], outline=line, fill="white")
+            if kind == "off":
+                d.rectangle([x + 1, y + 1, x + 34, y + 30], fill=gray)
+                bolt(d, x + 17, y + 15, 8, ink)
+            elif kind == "first":
+                d.rectangle([x + 1, y + 1, x + 17, y + 30], fill=gray)
+                bolt(d, x + 10, y + 15, 8, "#ffe600", ink)
+            elif kind == "second":
+                d.rectangle([x + 17, y + 1, x + 34, y + 30], fill=gray)
+                bolt(d, x + 24, y + 15, 8, "#ffe600", ink)
+            elif kind == "maybe":
+                d.rectangle([x + 1, y + 1, x + 34, y + 30], fill="#fff6bf")
+            d.text((x + 44, y + 4), label, font=font(15), fill=ink)
+            x += 44 + int(d.textlength(label, font=font(15))) + 22
+
     buf = io.BytesIO()
     img.save(buf, "PNG")
     buf.seek(0)
@@ -104,13 +223,15 @@ if __name__ == "__main__":
             old = json.load(f)
 
     if old.get("date") == today and old.get("slots") == snap:
-        print("без змін")
+        print("без изменений")
         raise SystemExit
 
-    iv = intervals(snap)
-    text = "\n".join("🕯 " + x for x in iv) if iv else "Відключень немає"
-    send(draw(slots), "Графік відключень, група 2.2\n" + text)
+    st = half_states(snap)
+    lines = (["🕯 " + x for x in runs(st, "off")]
+             + ["❓ возможно " + x for x in runs(st, "maybe")])
+    text = "\n".join(lines) if lines else "Отключений нет"
+    send(draw(slots), "График отключений, группа 2.2\n" + text)
 
     with open(STATE, "w", encoding="utf-8") as f:
         json.dump({"date": today, "slots": snap}, f, ensure_ascii=False)
-    print("надіслано")
+    print("отправлено")
