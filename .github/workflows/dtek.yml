@@ -25,11 +25,31 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: actions/cache@v4
+          cache: 'pip' # Автоматическое кэширование pip (если есть requirements.txt)
+
+      - name: Cache state
+        uses: actions/cache@v4
         with:
           path: last_slots.json
           key: state-${{ github.run_id }}
           restore-keys: state-
-      - run: pip install dtek-blackout-client pillow requests
-      - run: playwright install --with-deps chromium
-      - run: python dtek_to_tg.py
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium
+
+      - name: Install Python packages
+        run: pip install dtek-blackout-client pillow requests
+
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install chromium
+
+      - name: Install Playwright OS dependencies
+        run: sudo playwright install-deps chromium
+
+      - name: Run script
+        run: python dtek_to_tg.py
