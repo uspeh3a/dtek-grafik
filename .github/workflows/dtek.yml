@@ -1,0 +1,35 @@
+name: dtek
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Только проверить данные, без отправки"
+        type: boolean
+        default: true
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TZ: Europe/Kyiv
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      CHAT_ID: ${{ secrets.CHAT_ID }}
+      CITY: ${{ secrets.CITY }}
+      STREET: ${{ secrets.STREET }}
+      HOUSE: ${{ secrets.HOUSE }}
+      DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: last_slots.json
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+      - run: pip install dtek-blackout-client pillow requests
+      - run: playwright install --with-deps chromium
+      - run: python dtek_to_tg.py
