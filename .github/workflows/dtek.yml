@@ -25,7 +25,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: 'pip' # Автоматическое кэширование pip (если есть requirements.txt)
 
       - name: Cache state
         uses: actions/cache@v4
@@ -33,6 +32,12 @@ jobs:
           path: last_slots.json
           key: state-${{ github.run_id }}
           restore-keys: state-
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-dtek-v1
 
       - name: Cache Playwright browsers
         uses: actions/cache@v4
@@ -53,3 +58,4 @@ jobs:
 
       - name: Run script
         run: python dtek_to_tg.py
+
