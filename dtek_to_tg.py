@@ -7,7 +7,8 @@ from dtek_client.browser_auth import get_cleared_cookies
 
 # --- настройки (на GitHub берутся из секретов, на ПК из этих строк) ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHAT_ID   = os.environ["CHAT_ID"]
+# Поддерживает один ID или несколько через запятую (например: "-100111...,-100222...")
+CHAT_IDS  = [cid.strip() for cid in os.environ["CHAT_ID"].split(",") if cid.strip()]
 GROUP     = "GPV2.2"
 CITY      = os.environ["CITY"]
 STREET    = os.environ["STREET"]
@@ -41,7 +42,7 @@ async def fetch_slots():
     if csrf:
         headers["X-CSRF-Token"] = csrf
     session = AsyncSession(timeout=20.0, headers=headers, cookies=cookies,
-                           impersonate="chrome120")
+                            impersonate="chrome120")
     async with DtekClient("oem", ajax_url=f"{BASE}/ua/ajax", session=session) as c:
         resp = await c.get_home_num(CITY, STREET)
         return resp.fact.get_group_today(GROUP)
@@ -209,7 +210,7 @@ def table_image(slots):
 def draw(slots):
     img = table_image(slots)
     W, H0 = img.size
-    H = max(H0, int(W / 1.8))                 # белые поля сверху и снизу
+    H = max(H0, int(W / 1.8))               # белые поля сверху и снизу
     out = Image.new("RGB", (W, H), "white")
     out.paste(img, (0, (H - H0) // 2))
     buf = io.BytesIO()
@@ -219,11 +220,13 @@ def draw(slots):
 
 
 def send(buf, caption):
-    r = requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-        data={"chat_id": CHAT_ID, "caption": caption},
-        files={"photo": ("schedule.png", buf)}, timeout=30)
-    r.raise_for_status()
+    for chat_id in CHAT_IDS:
+        r = requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+            data={"chat_id": chat_id, "caption": caption},
+            files={"photo": ("schedule.png", buf)}, timeout=30)
+        r.raise_for_status()
+        buf.seek(0)  # Сбрасываем указатель для отправки в следующий чат
 
 
 if __name__ == "__main__":
@@ -248,6 +251,7 @@ if __name__ == "__main__":
     lines = (["🕯 " + x for x in runs(st, "off")]
              + ["❓ возможно " + x for x in runs(st, "maybe")])
     text = "\n".join(lines) if lines else "Отключений нет"
+    
     send(draw(slots), "График отключений, группа 2.2\n" + text)
 
     with open(STATE, "w", encoding="utf-8") as f:
