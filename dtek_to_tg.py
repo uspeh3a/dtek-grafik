@@ -1,21 +1,27 @@
 import asyncio, io, json, os, datetime as dt
+from zoneinfo import ZoneInfo
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from curl_cffi.requests import AsyncSession
 from dtek_client import DtekClient
 from dtek_client.browser_auth import get_cleared_cookies
 
-# --- настройки (на GitHub берутся из секретов, на ПК из этих строк) ---
+# --- настройки (на GitHub берутся из секретов) ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-# Поддерживает один ID или несколько через запятую (например: "-100111...,-100222...")
+# Один ID или несколько через запятую (например: "-100111...,-100222...")
 CHAT_IDS  = [cid.strip() for cid in os.environ["CHAT_ID"].split(",") if cid.strip()]
 GROUP     = "GPV2.2"
 CITY      = os.environ["CITY"]
 STREET    = os.environ["STREET"]
 HOUSE     = os.environ["HOUSE"]
 BASE      = "https://www.dtek-oem.com.ua"
-# ----------------------------------------------------------------------
+# Не публиковать «на завтра», пока в нём нет ни одного отключения
+# (обычно это значит, что график ещё не опубликован). Поставь False, чтобы
+# публиковать и «отключений нет».
+SKIP_EMPTY_TOMORROW = True
+# ------------------------------------------------
 
+KYIV  = ZoneInfo("Europe/Kyiv")
 HERE  = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.join(HERE, "last_slots.json")
 
@@ -25,10 +31,9 @@ HALF = {
     "maybe": ("maybe", "maybe"),
     "mfirst": ("maybe", "on"), "msecond": ("on", "maybe"),
 }
-HCOLOR = {"on": "#4caf50", "off": "#e53935", "maybe": "#ffb300"}
 
 
-async def fetch_slots():
+async def fetch_fact():
     url = f"{BASE}/ua/shutdowns"
     cookies, csrf = await get_cleared_cookies(url)
     headers = {
@@ -42,15 +47,72 @@ async def fetch_slots():
     if csrf:
         headers["X-CSRF-Token"] = csrf
     session = AsyncSession(timeout=20.0, headers=headers, cookies=cookies,
-                            impersonate="chrome120")
+                           impersonate="chrome120")
     async with DtekClient("oem", ajax_url=f"{BASE}/ua/ajax", session=session) as c:
         resp = await c.get_home_num(CITY, STREET)
-        return resp.fact.get_group_today(GROUP)
+        return resp.fact
+
+
+def collect(fact):
+    """Возвращает (сегодня, {дата: слоты}) для сегодня и завтра."""
+    if fact.today_ts:
+        today = dt.datetime.fromtimestamp(fact.today_ts, KYIV).date()
+    else:
+        today = dt.datetime.now(KYIV).date()
+    days = {}
+    for ts_str, groups in fact.days.items():
+        slots = groups.get(GROUP)
+        if not slots:
+            continue
+        d = dt.datetime.fromtimestamp(int(ts_str), KYIV).date()
+        if today <= d <= today + dt.timedelta(days=1):
+            days[d] = slots
+    return today, days
 
 
 def snapshot(slots):
     return {k: str(getattr(v, "value", v)).lower() for k, v in slots.items()}
 
+
+def has_outage(snap):
+    return any(v != "yes" for v in snap.values())
+
+
+# ---------- состояние: что уже опубликовано по каждой дате ----------
+
+def load_state():
+    if not os.path.exists(STATE):
+        return {}
+    with open(STATE, encoding="utf-8") as f:
+        raw = json.load(f)
+    if "days" in raw:
+        return raw["days"]
+    if "date" in raw and "slots" in raw:           # старый формат
+        return {raw["date"]: raw["slots"]}
+    return {}
+
+
+def save_state(state):
+    with open(STATE, "w", encoding="utf-8") as f:
+        json.dump({"days": state}, f, ensure_ascii=False)
+
+
+def plan(today, days, state):
+    """Что отправить: список (дата, snap). Отправляем только изменения."""
+    todo = []
+    for d in sorted(days):
+        snap = snapshot(days[d])
+        key = d.isoformat()
+        if state.get(key) == snap:
+            continue
+        if SKIP_EMPTY_TOMORROW and d > today and key not in state \
+                and not has_outage(snap):
+            continue
+        todo.append((d, snap))
+    return todo
+
+
+# ---------- подпись и картинка ----------
 
 def half_states(snap):
     out = []
@@ -71,9 +133,20 @@ def runs(states, target):
     return [f"{f(s * 30)}–{f(e * 30)}" for s, e in res]
 
 
+def day_label(d, today):
+    return "на сегодня" if d == today else "на завтра"
+
+
+def make_caption(d, today, snap):
+    st = half_states(snap)
+    lines = (["🕯 " + x for x in runs(st, "off")]
+             + ["❓ возможно " + x for x in runs(st, "maybe")])
+    text = "\n".join(lines) if lines else "Отключений нет"
+    return f"График отключений {day_label(d, today)} {d:%d.%m}, группа 2.2\n" + text
+
+
 TXT = {
     "title": "График отключений, очередь 2.2",
-    "tab": "на сегодня",
     "upd": "Обновлено:",
     "hours": "Часовые\nпромежутки",
     "legend": ["Свет есть", "Света нет", "Света не будет первые 30 мин.",
@@ -114,8 +187,7 @@ def bolt(d, cx, cy, s, fill, outline=None):
     d._image.paste(small, (left, top), small)
 
 
-def table_image(slots):
-    snap = snapshot(slots)
+def table_image(snap, day, label, updated):
     ink, gray, line = "#1b2437", "#d3d4d6", "#c9cacc"
     W, H = 1090, 400
     used = set(v for k in snap for v in HALF.get(snap[k], ("on", "on")))
@@ -123,18 +195,18 @@ def table_image(slots):
         H += 44
     img = Image.new("RGB", (W, H), "white")
     d = ImageDraw.Draw(img)
-    now = dt.datetime.now()
 
     d.text((40, 22), TXT["title"], font=font(34, True), fill=ink)
 
     # вкладка с датой
-    tab = f"{TXT['tab']} {now:%d.%m.%y}"
+    tab = f"{label} {day:%d.%m.%y}"
     tf = font(24, True)
     tw = int(d.textlength(tab, font=tf))
     d.rounded_rectangle([40, 82, 40 + 70 + tw, 134], radius=14, fill="#ffe600")
     bolt(d, 68, 108, 11, ink)
     d.text((92, 93), tab, font=tf, fill=ink)
-    d.text((40, 160), f"{TXT['upd']} {now:%d.%m.%Y %H:%M}", font=font(17), fill="#5a6070")
+    upd = updated or f"{dt.datetime.now(KYIV):%d.%m.%Y %H:%M}"
+    d.text((40, 160), f"{TXT['upd']} {upd}", font=font(17), fill="#5a6070")
 
     # таблица
     x0, y0, lw, cw = 40, 195, 150, 36
@@ -189,7 +261,7 @@ def table_image(slots):
         rows.append([("maybe", legend[4])])
     for r, items in enumerate(rows):
         y, x = 350 + r * 44, 40
-        for kind, label in items:
+        for kind, text in items:
             d.rectangle([x, y, x + 34, y + 30], outline=line, fill="white")
             if kind == "off":
                 d.rectangle([x + 1, y + 1, x + 34, y + 30], fill=gray)
@@ -202,13 +274,13 @@ def table_image(slots):
                 bolt(d, x + 24, y + 15, 8, "#ffe600", ink)
             elif kind == "maybe":
                 d.rectangle([x + 1, y + 1, x + 34, y + 30], fill="#fff6bf")
-            d.text((x + 44, y + 4), label, font=font(15), fill=ink)
-            x += 44 + int(d.textlength(label, font=font(15))) + 22
+            d.text((x + 44, y + 4), text, font=font(15), fill=ink)
+            x += 44 + int(d.textlength(text, font=font(15))) + 22
     return img
 
 
-def draw(slots):
-    img = table_image(slots)
+def draw(snap, day, label, updated):
+    img = table_image(snap, day, label, updated)
     W, H0 = img.size
     H = max(H0, int(W / 1.8))               # белые поля сверху и снизу
     out = Image.new("RGB", (W, H), "white")
@@ -226,34 +298,37 @@ def send(buf, caption):
             data={"chat_id": chat_id, "caption": caption},
             files={"photo": ("schedule.png", buf)}, timeout=30)
         r.raise_for_status()
-        buf.seek(0)  # Сбрасываем указатель для отправки в следующий чат
+        print("отправлено в", chat_id)
+        buf.seek(0)
+
+
+def main():
+    fact = asyncio.run(fetch_fact())
+    today, days = collect(fact)
+
+    if not days:
+        print("нет данных по группе")
+        return
+
+    if os.environ.get("DRY_RUN"):
+        for d in sorted(days):
+            print(d, snapshot(days[d]))
+        return
+
+    state = load_state()
+    todo = plan(today, days, state)
+    if not todo:
+        print("без изменений")
+        return
+
+    for d, snap in todo:
+        send(draw(snap, d, day_label(d, today), fact.update),
+             make_caption(d, today, snap))
+        state[d.isoformat()] = snap
+        state = {k: v for k, v in state.items() if k >= today.isoformat()}
+        save_state(state)                  # после каждого успешно отправленного дня
+        print("готово:", d)
 
 
 if __name__ == "__main__":
-    slots = asyncio.run(fetch_slots())
-    snap = snapshot(slots)
-
-    if os.environ.get("DRY_RUN"):
-        print(slots)
-        raise SystemExit
-
-    today = dt.date.today().isoformat()
-    old = {}
-    if os.path.exists(STATE):
-        with open(STATE, encoding="utf-8") as f:
-            old = json.load(f)
-
-    if old.get("date") == today and old.get("slots") == snap:
-        print("без изменений")
-        raise SystemExit
-
-    st = half_states(snap)
-    lines = (["🕯 " + x for x in runs(st, "off")]
-             + ["❓ возможно " + x for x in runs(st, "maybe")])
-    text = "\n".join(lines) if lines else "Отключений нет"
-    
-    send(draw(slots), "График отключений, группа 2.2\n" + text)
-
-    with open(STATE, "w", encoding="utf-8") as f:
-        json.dump({"date": today, "slots": snap}, f, ensure_ascii=False)
-    print("отправлено")
+    main()
