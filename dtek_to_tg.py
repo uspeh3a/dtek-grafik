@@ -96,15 +96,29 @@ def font(size, bold=False):
 
 
 def bolt(d, cx, cy, s, fill, outline=None):
+    """Молния со сглаживанием: рисуется крупно и уменьшается."""
+    k = 8
     pts = [(0.15, -1), (-0.65, 0.1), (-0.05, 0.1), (-0.2, 1), (0.65, -0.25), (0.05, -0.25)]
-    d.polygon([(cx + x * s, cy + y * s) for x, y in pts], fill=fill, outline=outline)
+    size = int(2 * s + 8)
+    left, top = round(cx - size / 2), round(cy - size / 2)
+    px, py = (cx - left) * k, (cy - top) * k
+    P = [(px + x * s * k, py + y * s * k) for x, y in pts]
+    big = Image.new("RGBA", (size * k, size * k), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(big)
+    bd.polygon(P, fill=fill)
+    bd.line(P + [P[0]], fill=fill, width=int(k * 1.2), joint="curve")   # скругляет углы
+    if outline:
+        bd.line(P + [P[0]], fill=outline, width=k, joint="curve")
+    small = big.resize((size, size), Image.LANCZOS)
+    d._image.paste(small, (left, top), small)
 
 
-def draw(slots):
+def table_image(slots):
     snap = snapshot(slots)
     ink, gray, line = "#1b2437", "#d3d4d6", "#c9cacc"
     W, H = 1090, 400
-    if "maybe" in set(v for k in snap for v in HALF.get(snap[k], ("on", "on"))):
+    used = set(v for k in snap for v in HALF.get(snap[k], ("on", "on")))
+    if "maybe" in used:
         H += 44
     img = Image.new("RGB", (W, H), "white")
     d = ImageDraw.Draw(img)
@@ -119,16 +133,14 @@ def draw(slots):
     d.rounded_rectangle([40, 82, 40 + 70 + tw, 134], radius=14, fill="#ffe600")
     bolt(d, 68, 108, 11, ink)
     d.text((92, 93), tab, font=tf, fill=ink)
-
     d.text((40, 160), f"{TXT['upd']} {now:%d.%m.%Y %H:%M}", font=font(17), fill="#5a6070")
 
     # таблица
     x0, y0, lw, cw = 40, 195, 150, 36
     hh, rh = 80, 52
     xr, yb = x0 + lw + 24 * cw, y0 + hh + rh
-    d.rounded_rectangle([x0, y0, xr, yb], radius=14, outline=line, width=2, fill="white")
+    d.rectangle([x0, y0, xr, yb], outline=line, width=2, fill="white")
 
-    # клетки
     for i, k in enumerate(sorted(snap, key=int)):
         a, b = HALF.get(snap[k], ("on", "on"))
         x = x0 + lw + i * cw
@@ -147,31 +159,29 @@ def draw(slots):
         elif a == "maybe" or b == "maybe":
             bolt(d, cx + (-8 if a == "maybe" else 8), cy, 10, "#ffffff", "#9a8f3a")
 
-    # сетка
     for i in range(25):
         x = x0 + lw + i * cw
         d.line([x, y0, x, yb], fill=line, width=1)
     d.line([x0, y0 + hh, xr, y0 + hh], fill=line, width=1)
-    d.rounded_rectangle([x0, y0, xr, yb], radius=14, outline=line, width=2)
+    d.rectangle([x0, y0, xr, yb], outline=line, width=2)
 
-    # заголовок строки
     d.multiline_text((x0 + 12, y0 + hh / 2 - 22), TXT["hours"], font=font(19, True),
                      fill=ink, spacing=2)
 
-    # часы повёрнутым текстом
-    f = font(18, True)
+    # время начала каждого часа, повёрнутым текстом
+    f = font(17, True)
     for i in range(24):
-        t = f"{i:02d}-{i + 1:02d}"
+        t = f"{i:02d}:00"
         bb = d.textbbox((0, 0), t, font=f)
         w, th = bb[2] + 6, bb[3] - bb[1]
         tmp = Image.new("RGBA", (w, th + 6), (255, 255, 255, 0))
         ImageDraw.Draw(tmp).text((3, 3 - bb[1]), t, font=f, fill=ink)
-        tmp = tmp.rotate(270, expand=True)
-        img.paste(tmp, (int(x0 + lw + i * cw + (cw - tmp.width) / 2), y0 + 8), tmp)
+        tmp = tmp.rotate(90, expand=True)
+        img.paste(tmp, (int(x0 + lw + i * cw + (cw - tmp.width) / 2),
+                        y0 + (hh - tmp.height) // 2), tmp)
 
     # легенда
-    legend = TXT["legend"][:]
-    used = set(v for k in snap for v in HALF.get(snap[k], ("on", "on")))
+    legend = TXT["legend"]
     rows = [[("on", legend[0]), ("off", legend[1]), ("first", legend[2]),
              ("second", legend[3])]]
     if "maybe" in used:
@@ -193,9 +203,17 @@ def draw(slots):
                 d.rectangle([x + 1, y + 1, x + 34, y + 30], fill="#fff6bf")
             d.text((x + 44, y + 4), label, font=font(15), fill=ink)
             x += 44 + int(d.textlength(label, font=font(15))) + 22
+    return img
 
+
+def draw(slots):
+    img = table_image(slots)
+    W, H0 = img.size
+    H = max(H0, int(W / 1.8))                 # белые поля сверху и снизу
+    out = Image.new("RGB", (W, H), "white")
+    out.paste(img, (0, (H - H0) // 2))
     buf = io.BytesIO()
-    img.save(buf, "PNG")
+    out.save(buf, "PNG")
     buf.seek(0)
     return buf
 
