@@ -1,17 +1,12 @@
 name: dtek
 on:
-  schedule:
-    - cron: "*/15 * * * *"
+
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Только проверить данные, без отправки"
         type: boolean
         default: true
-
-concurrency:
-  group: dtek
-  cancel-in-progress: false
 
 jobs:
   run:
