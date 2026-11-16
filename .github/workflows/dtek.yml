@@ -46,7 +46,7 @@ jobs:
           key: playwright-${{ runner.os }}-chromium
 
       - name: Install Python packages
-        run: pip install dtek-blackout-client pillow requests
+        run: pip install "dtek-blackout-client==0.1.12" pillow requests
 
       - name: Install Playwright and deps
         run: playwright install --with-deps chromium
