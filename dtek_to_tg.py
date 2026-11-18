@@ -292,13 +292,17 @@ def draw(snap, day, label, updated):
 
 
 def send(buf, caption):
-    for chat_id in CHAT_IDS:
+    for entry in CHAT_IDS:
+        chat_id, _, thread = entry.partition(":")
+        data = {"chat_id": chat_id, "caption": caption}
+        if thread:
+            data["message_thread_id"] = thread
         r = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-            data={"chat_id": chat_id, "caption": caption},
+            data=data,
             files={"photo": ("schedule.png", buf)}, timeout=30)
         r.raise_for_status()
-        print("отправлено в", chat_id)
+        print("отправлено в", entry)
         buf.seek(0)
 
 
